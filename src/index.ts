@@ -1,150 +1,141 @@
-export default {
-	async fetch(request): Promise<Response> {
-		const corsHeaders = {
-			"Access-Control-Allow-Origin": "*",
-			"Access-Control-Allow-Methods": "GET,HEAD,POST,OPTIONS",
-			"Access-Control-Max-Age": "86400",
-		};
+// Toggle to allow all domains (true) or use whitelist (false)
+const ALLOW_ALL_DOMAINS = true;
 
-		// The URL for the remote third party API you want to fetch from
-		// but does not implement CORS
-		const API_URL = "https://examples.cloudflareworkers.com/demos/demoapi";
+// Whitelist of allowed domains
+const ALLOWED_DOMAINS = [
+  'haveibeenpwned.com',
+  'xposedornot.com',
+  'netlify.app',
+  'bolt.new',
+  'webcontainer-api.io'
+];
 
-		// The endpoint you want the CORS reverse proxy to be on
-		const PROXY_ENDPOINT = "/corsproxy/";
+// CORS headers configuration
+const corsHeaders = {
+  'Access-Control-Allow-Methods': 'GET, HEAD, POST, PUT, DELETE, OPTIONS',
+  'Access-Control-Allow-Headers': '*',
+  'Access-Control-Max-Age': '86400',
+};
 
-		// The rest of this snippet for the demo page
-		function rawHtmlResponse(html) {
-			return new Response(html, {
-				headers: {
-					"content-type": "text/html;charset=UTF-8",
-				},
-			});
-		}
+// Check if the origin is allowed
+function isAllowedOrigin(origin) {
+  // If no origin and all domains allowed, return true
+  if (!origin && ALLOW_ALL_DOMAINS) return true;
+  if (!origin) return false;
+  
+  // If all domains are allowed, return true
+  if (ALLOW_ALL_DOMAINS) return true;
+  
+  try {
+    const hostname = new URL(origin).hostname;
+    return ALLOWED_DOMAINS.some(domain => {
+      // Support subdomain matching
+      // e.g., api.example.com matches example.com
+      return hostname === domain || hostname.endsWith('.' + domain);
+    });
+  } catch {
+    return false;
+  }
+}
 
-		const DEMO_PAGE = `
-      <!DOCTYPE html>
-      <html>
-      <body>
-        <h1>API GET without CORS Proxy</h1>
-        <a target="_blank" href="https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API/Using_Fetch#Checking_that_the_fetch_was_successful">Shows TypeError: Failed to fetch since CORS is misconfigured</a>
-        <p id="noproxy-status"/>
-        <code id="noproxy">Waiting</code>
-        <h1>API GET with CORS Proxy</h1>
-        <p id="proxy-status"/>
-        <code id="proxy">Waiting</code>
-        <h1>API POST with CORS Proxy + Preflight</h1>
-        <p id="proxypreflight-status"/>
-        <code id="proxypreflight">Waiting</code>
-        <script>
-        let reqs = {};
-        reqs.noproxy = () => {
-          return fetch("${API_URL}").then(r => r.json())
-        }
-        reqs.proxy = async () => {
-          let href = "${PROXY_ENDPOINT}?apiurl=${API_URL}"
-          return fetch(window.location.origin + href).then(r => r.json())
-        }
-        reqs.proxypreflight = async () => {
-          let href = "${PROXY_ENDPOINT}?apiurl=${API_URL}"
-          let response = await fetch(window.location.origin + href, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-              msg: "Hello world!"
-            })
-          })
-          return response.json()
-        }
-        (async () => {
-        for (const [reqName, req] of Object.entries(reqs)) {
-          try {
-            let data = await req()
-            document.getElementById(reqName).textContent = JSON.stringify(data)
-          } catch (e) {
-            document.getElementById(reqName).textContent = e
-          }
-        }
-      })()
-        </script>
-      </body>
-      </html>
-    `;
+// Handle OPTIONS requests (CORS preflight)
+function handleOptions(request) {
+  const origin = request.headers.get('Origin');
+  
+  if (!isAllowedOrigin(origin)) {
+    return new Response('Origin not allowed', { status: 403 });
+  }
 
-		async function handleRequest(request) {
-			const url = new URL(request.url);
-			let apiUrl = url.searchParams.get("apiurl");
+  if (origin !== null &&
+      request.headers.get('Access-Control-Request-Method') !== null &&
+      request.headers.get('Access-Control-Request-Headers') !== null) {
+    const responseHeaders = {
+      ...corsHeaders,
+      'Access-Control-Allow-Origin': origin || '*'
+    };
 
-			if (apiUrl == null) {
-				apiUrl = API_URL;
-			}
+    // Handle CORS preflight request
+    return new Response(null, {
+      headers: responseHeaders,
+    });
+  } else {
+    // Handle standard OPTIONS request
+    return new Response(null, {
+      headers: {
+        Allow: 'GET, HEAD, POST, PUT, DELETE, OPTIONS',
+      },
+    });
+  }
+}
 
-			// Rewrite request to point to API URL. This also makes the request mutable
-			// so you can add the correct Origin header to make the API server think
-			// that this request is not cross-site.
-			request = new Request(apiUrl, request);
-			request.headers.set("Origin", new URL(apiUrl).origin);
-			let response = await fetch(request);
-			// Recreate the response so you can modify the headers
+// Main request handling function
+async function handleRequest(request) {
+  const origin = request.headers.get('Origin');
+  
+  // Check if origin is allowed
+  if (!isAllowedOrigin(origin)) {
+    return new Response('Origin not allowed', { status: 403 });
+  }
 
-			response = new Response(response.body, response);
-			// Set CORS headers
+  // Get the target URL and parameters
+  const url = new URL(request.url);
+  const targetUrl = url.searchParams.get('url');
+  
+  if (!targetUrl) {
+    return new Response('Missing URL parameter', { status: 400 });
+  }
+  
+  // Build complete target URL with all parameters
+  const targetUrlObj = new URL(targetUrl);
+  // Copy all parameters except 'url'
+  url.searchParams.forEach((value, key) => {
+    if (key !== 'url') {
+      targetUrlObj.searchParams.append(key, value);
+    }
+  });
+  
+  const finalTargetUrl = targetUrlObj.toString();
 
-			response.headers.set("Access-Control-Allow-Origin", url.origin);
+  try {
+    // Create new headers with custom User-Agent
+    const newHeaders = new Headers(request.headers);
+    newHeaders.set('User-Agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36');
+    
+    // Create modified request
+    const modifiedRequest = new Request(finalTargetUrl, {
+      method: request.method,
+      headers: newHeaders,
+      body: request.body,
+    });
 
-			// Append to/Add Vary header so browser will cache response correctly
-			response.headers.append("Vary", "Origin");
+    // Fetch from target URL
+    const response = await fetch(modifiedRequest);
+    const responseHeaders = new Headers(response.headers);
+    
+    // Add necessary CORS headers
+    responseHeaders.set('Access-Control-Allow-Origin', origin || '*');
+    responseHeaders.set('Access-Control-Allow-Methods', corsHeaders['Access-Control-Allow-Methods']);
+    responseHeaders.set('Access-Control-Allow-Headers', corsHeaders['Access-Control-Allow-Headers']);
 
-			return response;
-		}
+    // Return proxied response
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: responseHeaders,
+    });
 
-		async function handleOptions(request) {
-			if (
-				request.headers.get("Origin") !== null &&
-				request.headers.get("Access-Control-Request-Method") !== null &&
-				request.headers.get("Access-Control-Request-Headers") !== null
-			) {
-				// Handle CORS preflight requests.
-				return new Response(null, {
-					headers: {
-						...corsHeaders,
-						"Access-Control-Allow-Headers": request.headers.get(
-							"Access-Control-Request-Headers",
-						),
-					},
-				});
-			} else {
-				// Handle standard OPTIONS request.
-				return new Response(null, {
-					headers: {
-						Allow: "GET, HEAD, POST, OPTIONS",
-					},
-				});
-			}
-		}
+  } catch (err) {
+    return new Response(err.message, { status: 500 });
+  }
+}
 
-		const url = new URL(request.url);
-		if (url.pathname.startsWith(PROXY_ENDPOINT)) {
-			if (request.method === "OPTIONS") {
-				// Handle CORS preflight requests
-				return handleOptions(request);
-			} else if (
-				request.method === "GET" ||
-				request.method === "HEAD" ||
-				request.method === "POST"
-			) {
-				// Handle requests to the API server
-				return handleRequest(request);
-			} else {
-				return new Response(null, {
-					status: 405,
-					statusText: "Method Not Allowed",
-				});
-			}
-		} else {
-			return rawHtmlResponse(DEMO_PAGE);
-		}
-	},
-} satisfies ExportedHandler;
+// Event listener for incoming requests
+addEventListener('fetch', event => {
+  const request = event.request;
+  
+  if (request.method === 'OPTIONS') {
+    event.respondWith(handleOptions(request));
+  } else {
+    event.respondWith(handleRequest(request));
+  }
+});
